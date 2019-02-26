@@ -44,6 +44,9 @@
 #include <asm/processor.h>
 #include <asm/debugreg.h>
 #include <asm/user.h>
+#include "../../events/perf_event.h"
+
+extern int intel_lbr_fixup_ip(struct pt_regs *regs);
 
 /* Per cpu debug control register value */
 DEFINE_PER_CPU(unsigned long, cpu_dr7);
@@ -455,7 +458,8 @@ static int hw_breakpoint_handler(struct die_args *args)
 	struct perf_event *bp;
 	unsigned long dr7, dr6;
 	unsigned long *dr6_p;
-
+	struct pt_regs fixup_regs;
+	int retval;
 	/* The DR6 value is pointed by args->err */
 	dr6_p = (unsigned long *)ERR_PTR(args->err);
 	dr6 = *dr6_p;
@@ -478,6 +482,7 @@ static int hw_breakpoint_handler(struct die_args *args)
 	 */
 	current->thread.debugreg6 &= ~DR_TRAP_BITS;
 	cpu = get_cpu();
+	intel_pmu_lbr_read();
 
 	/* Handle all the breakpoints that were triggered */
 	for (i = 0; i < HBP_NUM; ++i) {
@@ -506,8 +511,17 @@ static int hw_breakpoint_handler(struct die_args *args)
 			rcu_read_unlock();
 			break;
 		}
-
-		perf_bp_event(bp, args->regs);
+		fixup_regs = *args->regs;
+		if (bp->attr.precise_ip > 1) {
+			retval = intel_lbr_fixup_ip(&fixup_regs);
+			if (retval)
+				fixup_regs.flags |= PERF_EFLAGS_EXACT;
+			else
+				fixup_regs.flags &= ~PERF_EFLAGS_EXACT;
+		} else {
+			fixup_regs.flags &= ~PERF_EFLAGS_EXACT;
+		}
+		perf_bp_event(bp, &fixup_regs);
 
 		/*
 		 * Set up resume flag to avoid breakpoint recursion when
